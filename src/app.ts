@@ -8,41 +8,20 @@ import express, {
 import prisma from "./lib/prisma.js";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
-import multer from "multer";
+// import multer from "multer";
 import cloudinary from "./utils/cloudinary.js";
 // import path from "path";
 import crypto from "crypto";
-import nodemailer from "nodemailer";
-
-// Multer Configuration
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
-  fileFilter: (_req, file, cb) => {
-    const allowedTypes = [
-      "image/jpeg",
-      "image/jpg",
-      "image/png",
-      "image/webp",
-      "image/gif",
-    ];
-
-    if (allowedTypes.includes(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new Error("Only jpeg, jpg, png, webp, and gif images are allowed"));
-    }
-  },
-});
-
-// Email Configuration
-const transporter = nodemailer.createTransport({
-  service: "gmail",
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
-});
+// import nodemailer from "nodemailer";
+import registerRoute from "./routes/registerRoute.js";
+import pointRoute from "./routes/pointRoute.js";
+import couponRoute from "./routes/couponRoute.js";
+import transactionRoute from "./routes/transactionRoute.js";
+import upload from "./middlewares/multer.js";
+import transporter from "./utils/transporter.js";
+import createEventRouter from "./routes/createEventRoute.js";
+import getEventRoute from "./routes/getEventDataRoute.js";
+import deleteEventRoute from "./routes/deleteEventRoute.js";
 
 const app: Application = express();
 const PORT = process.env.PORT || 8000;
@@ -55,380 +34,18 @@ app.get("/api/health", (req: Request, res: Response) => {
     .json({ message: "API is Running!", uptime: process.uptime() });
 });
 
-// No Dupes RefCode
-
-function generateRefCode(length = 8) {
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-  let result = "";
-  for (let i = 0; i < length; i++) {
-    result += chars[Math.floor(Math.random() * chars.length)];
-  }
-  return result;
-}
-
-async function getUniqueRefCode() {
-  let code = generateRefCode();
-  let existing = await prisma.user.findUnique({
-    where: { refCode: code },
-  });
-
-  while (existing) {
-    code = generateRefCode();
-    existing = await prisma.user.findUnique({
-      where: { refCode: code },
-    });
-  }
-
-  return code;
-}
-
 // Register
-app.post("/api/auth/register", async (req: Request, res: Response) => {
-  const { name, email, password, role, referralCode } = req.body;
-
-  if (!name || !email || !password) {
-    return res.status(400).json({
-      message: "Name, email and password are required",
-    });
-  }
-
-  try {
-    // Check existing email
-    const existingUser = await prisma.user.findUnique({
-      where: { email },
-    });
-
-    if (existingUser) {
-      return res.status(409).json({
-        message: "Email already exists",
-      });
-    }
-
-    // Hash password
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    // Check referral
-    let referrer = null;
-
-    if (referralCode) {
-      referrer = await prisma.user.findUnique({
-        where: { refCode: referralCode },
-      });
-
-      if (!referrer) {
-        return res.status(400).json({
-          message: "Invalid referral code",
-        });
-      }
-
-      if (referrer.email === email) {
-        return res.status(400).json({
-          message: "You cannot use your own referral code",
-        });
-      }
-    }
-
-    const DEFAULT_AVATAR =
-      "https://res.cloudinary.com/dqa5t9ocj/image/upload/v1772699201/default-avatar_aeumky.jpg";
-
-    // Create user
-    const createdUser = await prisma.user.create({
-      data: {
-        name,
-        email,
-        password: hashedPassword,
-        role: role ?? "CUSTOMER",
-        profilePic: DEFAULT_AVATAR,
-        refCode: await getUniqueRefCode(),
-        referredById: referrer ? referrer.id : null,
-      },
-    });
-
-    // Referral reward
-    if (referrer) {
-      const expiry = new Date();
-      expiry.setMonth(expiry.getMonth() + 3);
-
-      await prisma.$transaction([
-        prisma.point.create({
-          data: {
-            userId: referrer.id,
-            amount: 10000,
-            expiresAt: expiry,
-          },
-        }),
-
-        prisma.coupon.create({
-          data: {
-            userId: createdUser.id,
-            discountAmount: 10000,
-            expiresAt: expiry,
-          },
-        }),
-      ]);
-    }
-
-    // Send email notification
-    await transporter.sendMail({
-      from: `"Event Platform" <${process.env.EMAIL_USER}>`,
-      to: email,
-      subject: "Welcome to Event Platform 🎉",
-      html: `
-        <h2>Welcome ${name}!</h2>
-        <p>Your account has been successfully created.</p>
-        <p>You can now log in and start exploring events.</p>
-      `,
-    });
-
-    return res.status(201).json({
-      message: "User registered successfully",
-      data: {
-        id: createdUser.id,
-        name: createdUser.name,
-        email: createdUser.email,
-        role: createdUser.role,
-        refCode: createdUser.refCode,
-      },
-    });
-  } catch (error: any) {
-    return res.status(500).json({
-      message: "Something went wrong",
-      error: error.message,
-    });
-  }
-});
+app.use("/api", registerRoute);
 
 // Points
-app.get(
-  "/api/users/points",
-  verifyToken,
-  async (req: Request, res: Response) => {
-    const userEmail = (req as any).user.email;
-
-    const user = await prisma.user.findUnique({
-      where: { email: userEmail },
-    });
-
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    const now = new Date();
-
-    const activePoints = await prisma.point.findMany({
-      where: {
-        userId: user.id,
-        expiresAt: {
-          gt: now,
-        },
-      },
-    });
-
-    const total = activePoints.reduce((sum, p) => sum + p.amount, 0);
-
-    return res.status(200).json({
-      totalPoints: total,
-      details: activePoints,
-    });
-  },
-);
+app.use("/api/users", pointRoute);
 
 // Coupons
-app.get(
-  "/api/users/coupons",
-  verifyToken,
-  async (req: Request, res: Response) => {
-    const userEmail = (req as any).user.email;
-
-    const user = await prisma.user.findUnique({
-      where: { email: userEmail },
-    });
-
-    const now = new Date();
-
-    const coupons = await prisma.coupon.findMany({
-      where: {
-        userId: user!.id,
-        expiresAt: { gt: now },
-        isUsed: false,
-      },
-    });
-
-    return res.status(200).json({
-      coupons,
-    });
-  },
-);
+app.use("/api/users", couponRoute);
 
 // Transactions
-app.post(
-  "/api/transactions",
-  verifyToken,
-  async (req: Request, res: Response) => {
-    if ((req as any).user.role !== "CUSTOMER") {
-      return res.status(403).json({ message: "Only customers can purchase" });
-    }
+app.use("/api", transactionRoute);
 
-    const { eventId, quantity, couponId, voucherCode, usePoints } = req.body;
-
-    if (!eventId || !quantity || quantity <= 0) {
-      return res.status(400).json({ message: "Invalid event or quantity" });
-    }
-
-    const user = await prisma.user.findUnique({
-      where: { email: (req as any).user.email },
-    });
-
-    if (!user) return res.status(404).json({ message: "User not found" });
-
-    try {
-      const result = await prisma.$transaction(async (tx) => {
-        const event = await tx.event.findUnique({
-          where: { id: eventId },
-        });
-
-        if (!event) throw new Error("Event not found");
-
-        if (event.availableSeats < quantity) {
-          throw new Error("Not enough seats available");
-        }
-
-        let totalPrice = event.price * quantity;
-        let usedPointsAmount = 0;
-        let usedCouponId: number | null = null;
-        let usedVoucherId: number | null = null;
-
-        const now = new Date();
-
-        // ======================
-        // 🎟 APPLY COUPON
-        // ======================
-        if (couponId) {
-          const coupon = await tx.coupon.findFirst({
-            where: {
-              id: couponId,
-              userId: user.id,
-              expiresAt: { gt: now },
-              isUsed: false,
-            },
-          });
-
-          if (!coupon) throw new Error("Invalid coupon");
-
-          totalPrice -= coupon.discountAmount;
-          if (totalPrice < 0) totalPrice = 0;
-
-          usedCouponId = coupon.id;
-
-          await tx.coupon.update({
-            where: { id: coupon.id },
-            data: { isUsed: true },
-          });
-        }
-
-        // ======================
-        // 🎟 APPLY VOUCHER
-        // ======================
-        if (voucherCode) {
-          const voucher = await tx.voucher.findFirst({
-            where: {
-              code: voucherCode,
-              eventId: event.id,
-              expiresAt: { gt: now },
-            },
-          });
-
-          if (!voucher) throw new Error("Invalid voucher");
-
-          totalPrice -= voucher.discountAmount;
-          if (totalPrice < 0) totalPrice = 0;
-
-          usedVoucherId = voucher.id;
-        }
-
-        // ======================
-        // 💰 APPLY POINTS
-        // ======================
-        if (usePoints && totalPrice > 0) {
-          const activePoints = await tx.point.findMany({
-            where: {
-              userId: user.id,
-              expiresAt: { gt: now },
-            },
-            orderBy: {
-              expiresAt: "asc",
-            },
-          });
-
-          const totalAvailablePoints = activePoints.reduce(
-            (sum, p) => sum + p.amount,
-            0,
-          );
-
-          if (totalAvailablePoints > 0) {
-            let remainingToDeduct = Math.min(totalAvailablePoints, totalPrice);
-
-            for (const point of activePoints) {
-              if (remainingToDeduct <= 0) break;
-
-              const deductAmount = Math.min(point.amount, remainingToDeduct);
-
-              usedPointsAmount += deductAmount;
-              remainingToDeduct -= deductAmount;
-
-              if (deductAmount === point.amount) {
-                await tx.point.delete({
-                  where: { id: point.id },
-                });
-              } else {
-                await tx.point.update({
-                  where: { id: point.id },
-                  data: {
-                    amount: point.amount - deductAmount,
-                  },
-                });
-              }
-            }
-
-            totalPrice -= usedPointsAmount;
-          }
-        }
-
-        if (totalPrice < 0) totalPrice = 0;
-
-        // ======================
-        // 🎟 REDUCE SEATS
-        // ======================
-        await tx.event.update({
-          where: { id: event.id },
-          data: {
-            availableSeats: {
-              decrement: quantity,
-            },
-          },
-        });
-
-        const transaction = await tx.transaction.create({
-          data: {
-            userId: user.id,
-            eventId: event.id,
-            quantity,
-            totalPrice,
-            usedPoints: usedPointsAmount,
-            usedCouponId,
-            usedVoucherId,
-          },
-        });
-
-        return transaction;
-      });
-
-      return res.status(201).json(result);
-    } catch (error: any) {
-      return res.status(400).json({ message: error.message });
-    }
-  },
-);
 // Transaction:id/status
 // app.patch(
 //   "/api/transactions/:id/status",
@@ -495,68 +112,10 @@ app.post(
 // );
 
 // Create Event (Organizer)
-app.post("/api/events", verifyToken, async (req: Request, res: Response) => {
-  if ((req as any).user.role !== "ORGANIZER") {
-    return res
-      .status(403)
-      .json({ message: "Only organizers can create events" });
-  }
-
-  const { title, description, location, price, totalSeats, eventDate } =
-    req.body;
-
-  try {
-    const event = await prisma.event.create({
-      data: {
-        title,
-        description,
-        location,
-        price,
-        totalSeats,
-        availableSeats: totalSeats,
-        eventDate: new Date(eventDate),
-
-        organizer: {
-          connect: {
-            email: (req as any).user.email,
-          },
-        },
-      },
-    });
-
-    return res.status(201).json(event);
-  } catch (error: any) {
-    return res.status(500).json({ message: error.message });
-  }
-});
+app.use("/api", createEventRouter);
 
 // Get Event Data (Organizer)
-app.get(
-  "/api/organizer/events",
-  verifyToken,
-  async (req: Request, res: Response) => {
-    try {
-      if ((req as any).user.role !== "ORGANIZER") {
-        return res.status(403).json({ message: "Only organizers allowed" });
-      }
-
-      const events = await prisma.event.findMany({
-        where: {
-          organizer: {
-            email: (req as any).user.email,
-          },
-        },
-        orderBy: {
-          createdAt: "desc",
-        },
-      });
-
-      res.json(events);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to fetch events" });
-    }
-  },
-);
+app.use("/api", getEventRoute);
 
 // Update Event (Organizer)
 app.patch(
@@ -594,38 +153,7 @@ app.patch(
 );
 
 // Delete Event (Organizer)
-app.delete(
-  "/api/events/:id",
-  verifyToken,
-  async (req: Request, res: Response) => {
-    try {
-      const eventId = Number(req.params.id);
-
-      const event = await prisma.event.findFirst({
-        where: {
-          id: eventId,
-          organizer: {
-            email: (req as any).user.email,
-          },
-        },
-      });
-
-      if (!event) {
-        return res
-          .status(404)
-          .json({ message: "Event not found or not yours" });
-      }
-
-      await prisma.event.delete({
-        where: { id: eventId },
-      });
-
-      res.json({ message: "Event deleted successfully" });
-    } catch (error) {
-      res.status(500).json({ message: "Failed to delete event" });
-    }
-  },
-);
+app.use("/api", deleteEventRoute);
 
 // Accept / Reject Status (Organizer)
 app.patch(
@@ -900,8 +428,8 @@ app.post("/api/vouchers", verifyToken, async (req: Request, res: Response) => {
   }
 });
 
-// Attendee List (Organizer)
-app.get(
+//////////////////////// Attendee List (Organizer)
+/* app.get(
   "/api/events/:id/attendees",
   verifyToken,
   async (req: Request, res: Response) => {
@@ -970,7 +498,7 @@ app.get(
       return res.status(400).json({ message: error.message });
     }
   },
-);
+); */
 
 // Upload Payment Proof
 app.patch(
@@ -1151,7 +679,7 @@ app.get(
   },
 );
 
-// Attendee List
+// Attendee List (Organizer)
 app.get(
   "/api/events/:id/attendees",
   verifyToken,
@@ -1641,6 +1169,20 @@ app.post("/api/auth/reset-password", async (req: Request, res: Response) => {
   } catch (error: any) {
     return res.status(500).json({
       message: "Something went wrong",
+      error: error.message,
+    });
+  }
+});
+
+// Logout
+app.post("/api/auth/logout", verifyToken, (req: Request, res: Response) => {
+  try {
+    return res.status(200).json({
+      message: "Logout successful",
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      message: "Logout failed",
       error: error.message,
     });
   }
