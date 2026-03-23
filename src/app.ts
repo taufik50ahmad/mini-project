@@ -3,22 +3,11 @@ import express, {
   type Application,
   type Request,
   type Response,
-  type NextFunction,
 } from "express";
-import prisma from "./lib/prisma.js";
-import bcrypt from "bcrypt";
-import jwt from "jsonwebtoken";
-// import multer from "multer";
-import cloudinary from "./utils/cloudinary.js";
-// import path from "path";
-import crypto from "crypto";
-// import nodemailer from "nodemailer";
 import registerRoute from "./routes/registerRoute.js";
 import pointRoute from "./routes/pointRoute.js";
 import couponRoute from "./routes/couponRoute.js";
 import transactionRoute from "./routes/transactionRoute.js";
-import upload from "./middlewares/multer.js";
-import transporter from "./utils/transporter.js";
 import createEventRouter from "./routes/createEventRoute.js";
 import getEventRoute from "./routes/getEventDataRoute.js";
 import deleteEventRoute from "./routes/deleteEventRoute.js";
